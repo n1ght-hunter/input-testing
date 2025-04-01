@@ -1,0 +1,26 @@
+[package]
+name = "input-testing"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gst = { package = "gstreamer", version = "0.23" }
+gst_app = { package = "gstreamer-app", version = "0.23" }
+gst_video = { package = "gstreamer-video", version = "0.23" }
+gst_pbutils = { package = "gstreamer-pbutils", version = "0.23" }
+anyhow = "1"
+ctrlc = "3.4.5"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "^0.61", features = [
+    "Win32_Devices_Display",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Controls",
+    "Win32_System_ProcessStatus",
+] }
