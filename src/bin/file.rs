@@ -26,12 +26,12 @@ fn main() -> anyhow::Result<()> {
 
     let pipeline = gst::Pipeline::default();
 
-    let src = gst::ElementFactory::make("d3d12screencapturesrc")
-        .name("src")
-        .property_from_str("capture-api", "wgc")
-        .property_from_str("window-capture-mode", "client")
-        .property("window-handle", source.window_handle.0 as u64)
-        .build()?;
+    // let src = gst::ElementFactory::make("d3d12screencapturesrc")
+    //     .name("src")
+    //     .property_from_str("capture-api", "wgc")
+    //     .property_from_str("window-capture-mode", "client")
+    //     .property("window-handle", source.window_handle.0 as u64)
+    //     .build()?;
 
     let tee = gst::ElementFactory::make("tee").build()?;
 

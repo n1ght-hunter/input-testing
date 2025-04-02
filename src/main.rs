@@ -1,70 +1,44 @@
-use std::path::{Path, PathBuf};
-
-use get_windows::enumerate_windows;
 use gst::{
-    PadProbeType,
-    glib::{
-        self,
-        clone::Downgrade,
-        object::{Cast, ObjectExt as _},
-    },
+    glib::{clone::Downgrade, object::Cast as _},
     prelude::{
-        ElementExt as _, ElementExtManual, GstBinExt, GstBinExtManual as _, GstObjectExt as _,
-        PadExt, PadExtManual,
+        ElementExt as _, ElementExtManual as _, GstBinExt as _, GstBinExtManual as _,
+        GstObjectExt as _, PadExt as _, PadExtManual as _,
     },
 };
 
-pub mod get_windows;
+fn main() -> anyhow::Result<()> {
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("GST_DEBUG", "3")
+    };
 
-pub trait PipeLineSrc {
-    fn get_input_options() -> Vec<String>;
+    gst::init()?;
 
-    fn from_option(option: &str) -> Self;
-
-    fn to_element(self) -> Result<gst::Element, anyhow::Error>;
-}
-
-#[derive(Debug, Clone)]
-pub struct WindowsSrc {
-    window: get_windows::Window,
-}
-
-impl PipeLineSrc for WindowsSrc {
-    fn get_input_options() -> Vec<String> {
-        enumerate_windows().into_iter().map(|w| w.title).collect()
-    }
-
-    fn from_option(option: &str) -> Self {
-        let windows = enumerate_windows();
-        let window = windows
-            .iter()
-            .find(|w| w.title == option)
-            .ok_or(anyhow::anyhow!("No window found with title {}", option))
-            .unwrap()
-            .to_owned();
-
-        Self { window }
-    }
-
-    fn to_element(self) -> Result<gst::Element, anyhow::Error> {
-        Ok(gst::ElementFactory::make("d3d12screencapturesrc")
-            .name("src")
-            .property_from_str("capture-api", "wgc")
-            .property_from_str("window-capture-mode", "client")
-            .property("window-handle", self.window.window_handle.0 as u64)
-            .build()?)
-    }
-}
-
-fn create_pipline(
-    output_path: impl AsRef<Path>,
-    src: impl PipeLineSrc,
-) -> Result<gst::Pipeline, anyhow::Error> {
-    let path = output_path.as_ref();
+    let path = "test.mp4";
+    let window_title = "firefox";
 
     let pipeline = gst::Pipeline::default();
 
-    let video_src = src.to_element()?;
+    let source = input_testing::get_windows::enumerate_windows()
+        .into_iter()
+        .find(|w| w.title.to_lowercase().contains(window_title))
+        .ok_or(anyhow::anyhow!(
+            "No window found with title containing '{window_title}'"
+        ))?
+        .to_owned();
+
+    let src = gst::ElementFactory::make("d3d11screencapturesrc")
+        .name("src")
+        .property_from_str("capture-api", "wgc")
+        .property_from_str("window-capture-mode", "client")
+        .property("window-handle", source.window_handle.0 as u64)
+        .build()?;
+
+    // test src
+    // let src = gst::ElementFactory::make("videotestsrc")
+    //     .name("src")
+    //     .property("is-live", true)
+    //     .build()?;
 
     let video_rate = gst::ElementFactory::make("videorate")
         .property("max-rate", 20)
@@ -72,19 +46,9 @@ fn create_pipline(
 
     let tee = gst::ElementFactory::make("tee").build()?;
 
+    // inference queue
     let inference_queue = gst::ElementFactory::make("queue").build()?;
 
-    let file_queue = gst::ElementFactory::make("queue").build()?;
-
-    file_queue.connect_closure(
-        "overrun",
-        false,
-        glib::closure!(move |_overlay: &gst::Element| {
-            println!("File queue overrun");
-        }),
-    );
-
-    // infernece path
     let inference_convert = gst::ElementFactory::make("videoconvert").build()?;
     let inference_scaler = gst::ElementFactory::make("videoscale").build()?;
     let inference_sink = gst_app::AppSink::builder()
@@ -96,7 +60,10 @@ fn create_pipline(
                 .build(),
         )
         .build();
-    // file path
+
+    // file queue
+    let file_queue = gst::ElementFactory::make("queue").build()?;
+
     let file_convert = gst::ElementFactory::make("videoconvert").build()?;
     let file_scaler = gst::ElementFactory::make("videoscale").build()?;
 
@@ -126,30 +93,23 @@ fn create_pipline(
         .build()?;
 
     pipeline.add_many(&[
-        &video_src,
-        &file_convert,
+        &src,
         &video_rate,
-        &tee,
-        &inference_queue,
-        &file_queue,
-        &inference_convert,
-        inference_sink.upcast_ref(),
-        &inference_scaler,
+        &file_convert,
         &file_scaler,
         &encoder,
         &file_sink,
+        &tee,
+        &file_queue,
+        &inference_queue,
+        &inference_convert,
+        &inference_scaler,
+        inference_sink.upcast_ref(),
     ])?;
 
-    // main pipeline
-    gst::Element::link_many(&[&video_src, &video_rate, &tee])?;
-    // // inference path
-    // gst::Element::link_many(&[
-    //     &inference_queue,
-    //     &inference_convert,
-    //     &inference_scaler,
-    //     inference_sink.upcast_ref(),
-    // ])?;
-    // // file path
+    gst::Element::link_many(&[&src, &video_rate, &tee])?;
+
+    // file path
     gst::Element::link_many(&[
         &file_queue,
         &file_convert,
@@ -158,90 +118,39 @@ fn create_pipline(
         &file_sink,
     ])?;
 
-    // let tee_inference_pad = tee.request_pad_simple("src_%u").unwrap();
-    // let queue_inference_pad = inference_queue.static_pad("sink").unwrap();
-    // tee_inference_pad.link(&queue_inference_pad)?;
+    // inference path
+    gst::Element::link_many(&[
+        &inference_queue,
+        &inference_convert,
+        &inference_scaler,
+        inference_sink.upcast_ref(),
+    ])?;
+
+    let tee_inference_pad = tee.request_pad_simple("src_%u").unwrap();
+    let queue_inference_pad = inference_queue.static_pad("sink").unwrap();
+    tee_inference_pad.link(&queue_inference_pad)?;
     let tee_file_pad = tee.request_pad_simple("src_%u").unwrap();
     let queue_file_pad = file_queue.static_pad("sink").unwrap();
     tee_file_pad.link(&queue_file_pad)?;
 
-    // appsink
     inference_sink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
-            .new_sample(|appsink| {
-                // Pull the sample in question out of the appsink's buffer.
-                let sample = appsink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
-                let caps = sample.caps();
-                if let Some(caps) = caps {
-                    println!("caps: {:?}", caps);
-                } else {
-                    println!("No caps");
-                }
-                // let buffer = sample.buffer().ok_or_else(|| {
-                //     gst::element_error!(
-                //         appsink,
-                //         gst::ResourceError::Failed,
-                //         ("Failed to get buffer from appsink")
-                //     );
-
-                //     gst::FlowError::Error
-                // })?;
-
-                // let map = buffer.map_readable().map_err(|_| {
-                //     gst::element_error!(
-                //         appsink,
-                //         gst::ResourceError::Failed,
-                //         ("Failed to map buffer readable")
-                //     );
-
-                //     gst::FlowError::Error
-                // })?;
+            .new_sample(|_appsink| {
+                println!("New sample in inference sink");
 
                 Ok(gst::FlowSuccess::Ok)
             })
             .build(),
     );
 
-    Ok(pipeline)
-}
-
-fn main() -> Result<(), anyhow::Error> {
-    #[allow(unsafe_code)]
-    unsafe {
-        std::env::set_var("GST_DEBUG", "4")
-    };
-    let source = WindowsSrc::get_input_options()
-        .into_iter()
-        .find(|w| w.to_lowercase().contains("firefox"))
-        .ok_or(anyhow::anyhow!(
-            "No window found with title containing 'firefox'"
-        ))?
-        .to_owned();
-
-    gst::init().unwrap();
-
-    let pipeline = create_pipline("output.mp4", WindowsSrc::from_option(&source)).unwrap();
-
     let src = pipeline.by_name("src").unwrap();
     let src_pad = src.static_pad("src").unwrap();
 
     // new frame in src element
-    src_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
+    src_pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
         println!("New frame in src element");
         gst::PadProbeReturn::Ok
     });
-
-    {
-        let elemnt_name = "encodebin0";
-        let src = pipeline.by_name(elemnt_name).unwrap();
-        let src_pad = src.static_pad("video_0").unwrap();
-
-        // new frame in src element
-        src_pad.add_probe(PadProbeType::BUFFER, move |_, _| {
-            println!("New frame in {} element", elemnt_name);
-            gst::PadProbeReturn::Ok
-        });
-    }
 
     pipeline.set_state(gst::State::Playing)?;
 
@@ -250,7 +159,7 @@ fn main() -> Result<(), anyhow::Error> {
         .expect("Pipeline without bus. Shouldn't happen!");
 
     ctrlc::set_handler({
-        let pipeline_weak = glib::object::ObjectExt::downgrade(&pipeline);
+        let pipeline_weak = pipeline.downgrade();
         move || {
             println!("Ctrl-C pressed! Stopping pipeline...");
             let Some(pipeline) = pipeline_weak.upgrade() else {
@@ -260,6 +169,7 @@ fn main() -> Result<(), anyhow::Error> {
 
             let src = pipeline.by_name("src").unwrap();
             src.send_event(gst::event::Eos::new());
+            println!("send eos to src");
         }
     })
     .unwrap();
